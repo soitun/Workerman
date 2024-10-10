@@ -93,6 +93,13 @@ class Request implements Stringable
     protected bool $isSafe = true;
 
     /**
+     * Is dirty.
+     *
+     * @var bool
+     */
+    protected bool $isDirty = false;
+
+    /**
      * Enable cache.
      *
      * @var bool
@@ -131,6 +138,19 @@ class Request implements Stringable
     }
 
     /**
+     * Set get.
+     *
+     * @param array $get
+     * @return Request
+     */
+    public function setGet(array $get): Request
+    {
+        $this->isDirty = true;
+        $this->data['get'] = $get;
+        return $this;
+    }
+
+    /**
      * Get post.
      *
      * @param string|null $name
@@ -146,6 +166,19 @@ class Request implements Stringable
             return $this->data['post'];
         }
         return $this->data['post'][$name] ?? $default;
+    }
+
+    /**
+     * Set post.
+     *
+     * @param array $post
+     * @return Request
+     */
+    public function setPost(array $post): Request
+    {
+        $this->isDirty = true;
+        $this->data['post'] = $post;
+        return $this;
     }
 
     /**
@@ -168,6 +201,18 @@ class Request implements Stringable
     }
 
     /**
+     * Set headers.
+     * @param array $headers
+     * @return $this
+     */
+    public function setHeaders(array $headers): Request
+    {
+        $this->isDirty = true;
+        $this->data['headers'] = $headers;
+        return $this;
+    }
+
+    /**
      * Get cookie item by name.
      *
      * @param string|null $name
@@ -177,8 +222,17 @@ class Request implements Stringable
     public function cookie(string $name = null, mixed $default = null): mixed
     {
         if (!isset($this->data['cookie'])) {
-            $this->data['cookie'] = [];
-            parse_str(preg_replace('/; ?/', '&', $this->header('cookie', '')), $this->data['cookie']);
+            $cookies = explode(';', $this->header('cookie', ''));
+            $mapped = array();
+
+            foreach ($cookies as $cookie) {
+                $cookie = explode('=', $cookie, 2);
+                if (count($cookie) !== 2) {
+                    continue;
+                }
+                $mapped[trim($cookie[0])] = $cookie[1];
+            }
+            $this->data['cookie'] = $mapped;
         }
         if ($name === null) {
             return $this->data['cookie'];
@@ -194,7 +248,15 @@ class Request implements Stringable
      */
     public function file(string $name = null)
     {
-        if (!isset($this->data['files'])) {
+        clearstatcache();
+        if (!empty($this->data['files'])) {
+            array_walk_recursive($this->data['files'], function ($value, $key) {
+                if ($key === 'tmp_name' && !is_file($value)) {
+                    $this->data['files'] = [];
+                }
+            });
+        }
+        if (empty($this->data['files'])) {
             $this->parsePost();
         }
         if (null === $name) {
@@ -616,7 +678,7 @@ class Request implements Stringable
                     break;
 
                 case "webkitrelativepath":
-                    $file['full_path'] = \trim($value);
+                    $file['full_path'] = trim($value);
                     break;
             }
         }
@@ -739,4 +801,15 @@ class Request implements Stringable
             });
         }
     }
+
+    /**
+     * @return void
+     */
+    public function __clone()
+    {
+        if ($this->isDirty) {
+            unset($this->data['get'], $this->data['post'], $this->data['headers']);
+        }
+    }
+
 }

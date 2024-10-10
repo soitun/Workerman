@@ -16,7 +16,6 @@ declare(strict_types=1);
 
 namespace Workerman\Protocols;
 
-use Exception;
 use Throwable;
 use Workerman\Connection\ConnectionInterface;
 use Workerman\Connection\TcpConnection;
@@ -24,8 +23,11 @@ use Workerman\Protocols\Http\Request;
 use Workerman\Worker;
 use function base64_encode;
 use function chr;
+use function deflate_add;
+use function deflate_init;
 use function floor;
-use function gettype;
+use function inflate_add;
+use function inflate_init;
 use function is_scalar;
 use function ord;
 use function pack;
@@ -37,6 +39,8 @@ use function strlen;
 use function strpos;
 use function substr;
 use function unpack;
+use const ZLIB_DEFAULT_STRATEGY;
+use const ZLIB_ENCODING_RAW;
 
 /**
  * WebSocket protocol.
@@ -51,6 +55,13 @@ class Websocket
     public const BINARY_TYPE_BLOB = "\x81";
 
     /**
+     * Websocket blob type.
+     *
+     * @var string
+     */
+    const BINARY_TYPE_BLOB_DEFLATE = "\xc1";
+
+    /**
      * Websocket arraybuffer type.
      *
      * @var string
@@ -58,12 +69,18 @@ class Websocket
     public const BINARY_TYPE_ARRAYBUFFER = "\x82";
 
     /**
+     * Websocket arraybuffer type.
+     *
+     * @var string
+     */
+    const BINARY_TYPE_ARRAYBUFFER_DEFLATE = "\xc2";
+
+    /**
      * Check the integrity of the package.
      *
      * @param string $buffer
      * @param TcpConnection $connection
      * @return int
-     * @throws Throwable
      */
     public static function input(string $buffer, TcpConnection $connection): int
     {
@@ -242,20 +259,23 @@ class Websocket
      * @param mixed $buffer
      * @param TcpConnection $connection
      * @return string
-     * @throws Throwable
      */
     public static function encode(mixed $buffer, TcpConnection $connection): string
     {
         if (!is_scalar($buffer)) {
-            throw new Exception("You can't send(" . gettype($buffer) . ") to client, you need to convert it to string. ");
+            $buffer = json_encode($buffer, JSON_UNESCAPED_UNICODE);
         }
 
-        $len = strlen($buffer);
         if (empty($connection->websocketType)) {
             $connection->websocketType = static::BINARY_TYPE_BLOB;
         }
 
+        if (ord($connection->websocketType) & 64) {
+            $buffer = static::deflate($connection, $buffer);
+        }
+
         $firstByte = $connection->websocketType;
+        $len = strlen($buffer);
 
         if ($len <= 125) {
             $encodeBuffer = $firstByte . chr($len) . $buffer;
@@ -308,8 +328,11 @@ class Websocket
      */
     public static function decode(string $buffer, TcpConnection $connection): string
     {
-        $firstByte = ord($buffer[1]);
-        $len = $firstByte & 127;
+        $firstByte = ord($buffer[0]);
+        $secondByte = ord($buffer[1]);
+        $len = $secondByte & 127;
+        $isFinFrame = (bool)($firstByte >> 7);
+        $rsv1 = 64 === ($firstByte & 64);
 
         if ($len === 126) {
             $masks = substr($buffer, 4, 4);
@@ -328,14 +351,69 @@ class Websocket
         $decoded = $data ^ $masks;
         if ($connection->context->websocketCurrentFrameLength) {
             $connection->context->websocketDataBuffer .= $decoded;
+            if ($rsv1) {
+                return static::inflate($connection, $connection->context->websocketDataBuffer, $isFinFrame);
+            }
             return $connection->context->websocketDataBuffer;
         }
-
         if ($connection->context->websocketDataBuffer !== '') {
             $decoded = $connection->context->websocketDataBuffer . $decoded;
             $connection->context->websocketDataBuffer = '';
         }
+        if ($rsv1) {
+            return static::inflate($connection, $decoded, $isFinFrame);
+        }
         return $decoded;
+    }
+
+    /**
+     * Inflate.
+     *
+     * @param TcpConnection $connection
+     * @param string $buffer
+     * @param bool $isFinFrame
+     * @return false|string
+     */
+    protected static function inflate(TcpConnection $connection, string $buffer, bool $isFinFrame): bool|string
+    {
+        if (!isset($connection->context->inflator)) {
+            $connection->context->inflator = inflate_init(
+                ZLIB_ENCODING_RAW,
+                [
+                    'level'    => -1,
+                    'memory'   => 8,
+                    'window'   => 15,
+                    'strategy' => ZLIB_DEFAULT_STRATEGY
+                ]
+            );
+        }
+        if ($isFinFrame) {
+            $buffer .= "\x00\x00\xff\xff";
+        }
+        return inflate_add($connection->context->inflator, $buffer);
+    }
+
+    /**
+     * Deflate.
+     *
+     * @param TcpConnection $connection
+     * @param string $buffer
+     * @return false|string
+     */
+    protected static function deflate(TcpConnection $connection, string $buffer): bool|string
+    {
+        if (!isset($connection->context->deflator)) {
+            $connection->context->deflator = deflate_init(
+                ZLIB_ENCODING_RAW,
+                [
+                    'level'    => -1,
+                    'memory'   => 8,
+                    'window'   => 15,
+                    'strategy' => ZLIB_DEFAULT_STRATEGY
+                ]
+            );
+        }
+        return substr(deflate_add($connection->context->deflator, $buffer), 0, -4);
     }
 
     /**
@@ -344,7 +422,6 @@ class Websocket
      * @param string $buffer
      * @param TcpConnection $connection
      * @return int
-     * @throws Throwable
      */
     public static function dealHandshake(string $buffer, TcpConnection $connection): int
     {
@@ -382,12 +459,14 @@ class Websocket
             $connection->context->websocketCurrentFrameBuffer = '';
             // Consume handshake data.
             $connection->consumeRecvBuffer($headerLength);
+            // Request from buffer
+            $request = new Request($buffer);
 
             // Try to emit onWebSocketConnect callback.
             $onWebsocketConnect = $connection->onWebSocketConnect ?? $connection->worker->onWebSocketConnect ?? false;
             if ($onWebsocketConnect) {
                 try {
-                    $onWebsocketConnect($connection, new Request($buffer));
+                    $onWebsocketConnect($connection, $request);
                 } catch (Throwable $e) {
                     Worker::stopAll(250, $e);
                 }
@@ -416,6 +495,16 @@ class Websocket
             $connection->send($handshakeMessage, true);
             // Mark handshake complete.
             $connection->context->websocketHandshake = true;
+
+            // Try to emit onWebSocketConnected callback.
+            $onWebsocketConnected = $connection->onWebSocketConnected ?? $connection->worker->onWebSocketConnected ?? false;
+            if ($onWebsocketConnected) {
+                try {
+                    $onWebsocketConnected($connection, $request);
+                } catch (Throwable $e) {
+                    Worker::stopAll(250, $e);
+                }
+            }
 
             // There are data waiting to be sent.
             if (!empty($connection->context->tmpWebsocketData)) {

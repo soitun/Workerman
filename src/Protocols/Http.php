@@ -86,7 +86,7 @@ class Http
      *
      * @param bool $value
      */
-    public static function enableCache(bool $value)
+    public static function enableCache(bool $value): void
     {
         static::$enableCache = $value;
     }
@@ -97,12 +97,11 @@ class Http
      * @param string $buffer
      * @param TcpConnection $connection
      * @return int
-     * @throws Throwable
      */
     public static function input(string $buffer, TcpConnection $connection): int
     {
         static $input = [];
-        if (!isset($buffer[512]) && isset($input[$buffer])) {
+        if (isset($input[$buffer])) {
             return $input[$buffer];
         }
         $crlfPos = strpos($buffer, "\r\n\r\n");
@@ -148,9 +147,9 @@ class Http
             return 0;
         }
 
-        if (!isset($buffer[512])) {
+        if (!isset($buffer[TcpConnection::MAX_CACHE_STRING_LENGTH])) {
             $input[$buffer] = $length;
-            if (count($input) > 512) {
+            if (count($input) > TcpConnection::MAX_CACHE_SIZE) {
                 unset($input[key($input)]);
             }
         }
@@ -168,8 +167,8 @@ class Http
     public static function decode(string $buffer, TcpConnection $connection): Request
     {
         static $requests = [];
-        $cacheable = static::$enableCache && !isset($buffer[512]);
-        if (true === $cacheable && isset($requests[$buffer])) {
+        $cacheable = static::$enableCache && !isset($buffer[TcpConnection::MAX_CACHE_STRING_LENGTH]);
+        if (isset($requests[$buffer])) {
             $request = clone $requests[$buffer];
             $request->connection = $connection;
             $connection->request = $request;
@@ -181,7 +180,7 @@ class Http
         $connection->request = $request;
         if (true === $cacheable) {
             $requests[$buffer] = $request;
-            if (count($requests) > 512) {
+            if (count($requests) > TcpConnection::MAX_CACHE_SIZE) {
                 unset($requests[key($requests)]);
             }
         }
@@ -194,7 +193,6 @@ class Http
      * @param string|Response $response
      * @param TcpConnection $connection
      * @return string
-     * @throws Throwable
      */
     public static function encode(mixed $response, TcpConnection $connection): string
     {
@@ -266,7 +264,6 @@ class Http
      * @param resource $handler
      * @param int $offset
      * @param int $length
-     * @throws Throwable
      */
     protected static function sendStream(TcpConnection $connection, $handler, int $offset = 0, int $length = 0): void
     {

@@ -103,6 +103,20 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
     public const STATUS_CLOSED = 8;
 
     /**
+     * Maximum string length for cache
+     *
+     * @var int
+     */
+    public const MAX_CACHE_STRING_LENGTH = 2048;
+
+    /**
+     * Maximum cache size.
+     *
+     * @var int
+     */
+    public const MAX_CACHE_SIZE = 512;
+
+    /**
      * Emitted when socket connection is successfully established.
      *
      * @var ?callable
@@ -110,11 +124,18 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
     public $onConnect = null;
 
     /**
-     * Emitted when websocket handshake completed (Only work when protocol is ws).
+     * Emitted before websocket handshake (Only works when protocol is ws).
      *
      * @var ?callable
      */
     public $onWebSocketConnect = null;
+
+    /**
+     * Emitted after websocket handshake (Only works when protocol is ws).
+     *
+     * @var ?callable
+     */
+    public $onWebSocketConnected = null;
 
     /**
      * Emitted when data is received.
@@ -379,7 +400,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * @param mixed $sendBuffer
      * @param bool $raw
      * @return bool|null
-     * @throws Throwable
      */
     public function send(mixed $sendBuffer, bool $raw = false): bool|null
     {
@@ -393,7 +413,7 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
             $parser = $this->protocol;
             try {
                 $sendBuffer = $parser::encode($sendBuffer, $this);
-            } catch(\Throwable $e) {
+            } catch(Throwable $e) {
                 $this->error($e);
             }
             if ($sendBuffer === '') {
@@ -584,7 +604,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * Resumes reading after a call to pauseRecv.
      *
      * @return void
-     * @throws Throwable
      */
     public function resumeRecv(): void
     {
@@ -602,7 +621,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * @param resource $socket
      * @param bool $checkEof
      * @return void
-     * @throws Throwable
      */
     public function baseRead($socket, bool $checkEof = true): void
     {
@@ -635,7 +653,7 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
         } else {
             $this->bytesRead += strlen($buffer);
             if ($this->recvBuffer === '') {
-                if (static::$enableCache && !isset($buffer[512]) && isset($requests[$buffer])) {
+                if (static::$enableCache && isset($requests[$buffer])) {
                     ++self::$statistics['total_request'];
                     $request = $requests[$buffer];
                     if ($request instanceof Request) {
@@ -710,9 +728,9 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
                     /** @var ProtocolInterface $parser */
                     $parser = $this->protocol;
                     $request = $parser::decode($oneRequestBuffer, $this);
-                    if (static::$enableCache && (!is_object($request) || $request instanceof Request) && $one && !isset($oneRequestBuffer[512])) {
+                    if (static::$enableCache && (!is_object($request) || $request instanceof Request) && $one && !isset($oneRequestBuffer[static::MAX_CACHE_STRING_LENGTH])) {
                         $requests[$oneRequestBuffer] = $request;
-                        if (count($requests) > 512) {
+                        if (count($requests) > static::MAX_CACHE_SIZE) {
                             unset($requests[key($requests)]);
                         }
                     }
@@ -743,7 +761,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * Base write handler.
      *
      * @return void
-     * @throws Throwable
      */
     public function baseWrite(): void
     {
@@ -790,7 +807,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      *
      * @param resource $socket
      * @return bool|int
-     * @throws Throwable
      */
     public function doSslHandshake($socket): bool|int
     {
@@ -877,7 +893,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * @param mixed $data
      * @param bool $raw
      * @return void
-     * @throws Throwable
      */
     public function close(mixed $data = null, bool $raw = false): void
     {
@@ -943,7 +958,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * Check whether send buffer will be full.
      *
      * @return void
-     * @throws Throwable
      */
     protected function checkBufferWillFull(): void
     {
@@ -960,7 +974,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * Whether send buffer is full.
      *
      * @return bool
-     * @throws Throwable
      */
     protected function bufferIsFull(): bool
     {
@@ -992,7 +1005,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * Destroy connection.
      *
      * @return void
-     * @throws Throwable
      */
     public function destroy(): void
     {
@@ -1080,7 +1092,6 @@ class TcpConnection extends ConnectionInterface implements JsonSerializable
      * Destruct.
      *
      * @return void
-     * @throws Throwable
      */
     public function __destruct()
     {
